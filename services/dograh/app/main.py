@@ -4,6 +4,7 @@ import json
 import os
 import wave
 from io import BytesIO
+from pathlib import Path
 from uuid import UUID
 
 import httpx
@@ -21,6 +22,9 @@ FREESWITCH_ESL_HOST = os.getenv("FREESWITCH_ESL_HOST", "freeswitch")
 FREESWITCH_ESL_PORT = int(os.getenv("FREESWITCH_ESL_PORT", "8021"))
 FREESWITCH_EVENT_SOCKET_PASSWORD = os.getenv("FREESWITCH_EVENT_SOCKET_PASSWORD", "ClueCon")
 DOGRAH_MEDIA_CHUNK_MS = int(os.getenv("DOGRAH_MEDIA_CHUNK_MS", "1200"))
+DOGRAH_GREETING_TEXT = os.getenv("DOGRAH_GREETING_TEXT", "Hello, VoxAgent is ready. How can I help you?")
+DOGRAH_DEFAULT_LANGUAGE = os.getenv("DOGRAH_DEFAULT_LANGUAGE") or os.getenv("DEFAULT_LANGUAGE", "bn-BD")
+RECORDINGS_DIR = Path(os.getenv("DOGRAH_RECORDINGS_DIR", "/recordings"))
 PCM_8K_BYTES_PER_MS = 16
 
 app = FastAPI(
@@ -66,29 +70,22 @@ async def process_audio(
     }
     if tenant_id is not None:
         data["tenant_id"] = str(tenant_id)
-    async with websockets.connect(f"{API_WS_URL}/voice/ws", open_timeout=5, close_timeout=2) as upstream:
-        await upstream.send(
-            DograhSocketMessage(
-                type="audio",
-                payload={
-                    **data,
-                    "audio_b64": base64.b64encode(audio_bytes).decode("ascii"),
-                },
-            ).model_dump_json()
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        response = await client.post(
+            f"{API_BASE_URL}/voice/audio",
+            data=data,
+            files={"audio": (audio.filename or "audio.wav", audio_bytes, audio.content_type or "audio/wav")},
         )
-        response = DograhSocketMessage.model_validate_json(await upstream.recv())
-        if response.type != "audio_result":
-            raise RuntimeError(f"Unexpected orchestrator response: {response.type}")
-    payload = response.payload
-    audio_response = base64.b64decode(payload.get("audio_b64") or "")
+        response.raise_for_status()
+    audio_response = response.content
     return StreamingResponse(
         iter([audio_response]),
-        media_type=payload.get("audio_mime_type", "audio/wav"),
+        media_type=response.headers.get("content-type", "audio/wav"),
         headers={
-            "x-call-id": payload.get("call_id", str(call_id)),
-            "x-session-id": payload.get("session_id", str(session_id)),
-            "x-transcript": (payload.get("transcript") or "").encode("utf-8").hex(),
-            "x-response-text": (payload.get("response_text") or "").encode("utf-8").hex(),
+            "x-call-id": response.headers.get("x-call-id", str(call_id)),
+            "x-session-id": response.headers.get("x-session-id", str(session_id)),
+            "x-transcript": response.headers.get("x-transcript", ""),
+            "x-response-text": response.headers.get("x-response-text", ""),
         },
     )
 
@@ -106,6 +103,33 @@ class OutboundCallRequest(BaseModel):
     caller_id_number: str = "7000"
 
 
+class SpeakRequest(BaseModel):
+    call_id: UUID
+    session_id: UUID
+    tenant_id: UUID | None = None
+    language: str = "bn-BD"
+    text: str = DOGRAH_GREETING_TEXT
+
+
+@app.post("/speak")
+async def speak_text(payload: SpeakRequest) -> StreamingResponse:
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.post(
+            f"{API_BASE_URL}/voice/speak",
+            json=payload.model_dump(mode="json"),
+        )
+        response.raise_for_status()
+    return StreamingResponse(
+        iter([response.content]),
+        media_type=response.headers.get("content-type", "audio/wav"),
+        headers={
+            "x-call-id": response.headers.get("x-call-id", str(payload.call_id)),
+            "x-session-id": response.headers.get("x-session-id", str(payload.session_id)),
+            "x-response-text": response.headers.get("x-response-text", ""),
+        },
+    )
+
+
 @app.post("/outbound/zoiper")
 async def outbound_zoiper(payload: OutboundCallRequest) -> dict:
     command = (
@@ -114,7 +138,10 @@ async def outbound_zoiper(payload: OutboundCallRequest) -> dict:
         f"origination_caller_id_number={payload.caller_id_number}}}"
         f"user/{payload.extension} 7000 XML default"
     )
-    response = await _send_esl_command(command)
+    try:
+        response = await _send_esl_command(command)
+    except OSError as exc:
+        response = f"accepted_with_socket_close: {exc}"
     return {"status": "queued", "extension": payload.extension, "freeswitch": response}
 
 
@@ -143,7 +170,7 @@ async def freeswitch_media(websocket: WebSocket) -> None:
     call_id = query.get("call_id")
     from_number = query.get("from") or "unknown"
     to_number = query.get("to") or "7000"
-    language = query.get("language") or "bn-BD"
+    language = query.get("language") or DOGRAH_DEFAULT_LANGUAGE
     try:
         async with websockets.connect(
             f"{API_WS_URL}/voice/ws",
@@ -168,6 +195,25 @@ async def freeswitch_media(websocket: WebSocket) -> None:
             active_call_id = started.payload.get("call_id") or call_id
             pcm_buffer = bytearray()
             chunk_size = DOGRAH_MEDIA_CHUNK_MS * PCM_8K_BYTES_PER_MS
+            await upstream.send(
+                DograhSocketMessage(
+                    type="speak",
+                    payload={
+                        "call_id": active_call_id,
+                        "session_id": session_id,
+                        "language": language,
+                        "text": DOGRAH_GREETING_TEXT,
+                    },
+                ).model_dump_json()
+            )
+            greeting = DograhSocketMessage.model_validate_json(await upstream.recv())
+            if greeting.type == "audio_result":
+                if not await _send_freeswitch_audio(
+                    websocket,
+                    greeting.payload,
+                    call_id=active_call_id,
+                ):
+                    return
 
             while True:
                 frame = await websocket.receive()
@@ -191,19 +237,12 @@ async def freeswitch_media(websocket: WebSocket) -> None:
                     )
                     response = DograhSocketMessage.model_validate_json(await upstream.recv())
                     if response.type == "audio_result":
-                        audio_b64 = response.payload.get("audio_b64") or ""
-                        await websocket.send_text(
-                            json.dumps(
-                                {
-                                    "type": "streamAudio",
-                                    "data": {
-                                        "audioDataType": "wav",
-                                        "sampleRate": 8000,
-                                        "audioData": audio_b64,
-                                    },
-                                }
-                            )
-                        )
+                        if not await _send_freeswitch_audio(
+                            websocket,
+                            response.payload,
+                            call_id=active_call_id,
+                        ):
+                            return
                 elif frame.get("text"):
                     await upstream.send(
                         DograhSocketMessage(
@@ -220,6 +259,9 @@ async def freeswitch_media(websocket: WebSocket) -> None:
     except WebSocketDisconnect:
         if call_id:
             await _end_call(call_id=call_id, session_id=locals().get("session_id"))
+    except RuntimeError:
+        if call_id:
+            await _end_call(call_id=call_id, session_id=locals().get("session_id"))
 
 
 def _pcm16_wav(audio: bytes, *, sample_rate: int) -> bytes:
@@ -230,6 +272,58 @@ def _pcm16_wav(audio: bytes, *, sample_rate: int) -> bytes:
         wav.setframerate(sample_rate)
         wav.writeframes(audio)
     return buffer.getvalue()
+
+
+async def _send_freeswitch_audio(websocket: WebSocket, payload: dict, *, call_id: str) -> bool:
+    audio = base64.b64decode(payload.get("audio_b64") or "")
+    if not audio:
+        return True
+    if await _broadcast_audio_file(call_id=call_id, audio=audio):
+        return True
+    audio_data_type = "raw"
+    try:
+        audio = _wav_to_pcm16(audio)
+    except wave.Error:
+        audio_data_type = "wav"
+    try:
+        await websocket.send_text(
+            json.dumps(
+                {
+                    "type": "streamAudio",
+                    "data": {
+                        "audioDataType": audio_data_type,
+                        "sampleRate": 8000,
+                        "audioData": base64.b64encode(audio).decode("ascii"),
+                    },
+                }
+            )
+        )
+        return True
+    except RuntimeError:
+        return False
+
+
+def _wav_to_pcm16(audio: bytes) -> bytes:
+    with wave.open(BytesIO(audio), "rb") as wav:
+        return wav.readframes(wav.getnframes())
+
+
+async def _broadcast_audio_file(*, call_id: str, audio: bytes) -> bool:
+    if not call_id:
+        return False
+    call_recordings_dir = RECORDINGS_DIR / "tts"
+    call_recordings_dir.mkdir(parents=True, exist_ok=True)
+    audio_path = call_recordings_dir / f"{call_id}_{int(asyncio.get_running_loop().time() * 1000)}.wav"
+    try:
+        try:
+            with wave.open(BytesIO(audio), "rb"):
+                audio_path.write_bytes(audio)
+        except wave.Error:
+            audio_path.write_bytes(_pcm16_wav(audio, sample_rate=8000))
+        response = await _send_esl_command(f"uuid_broadcast {call_id} {audio_path} aleg")
+        return "+OK" in response or "accepted" in response.lower()
+    except Exception:  # noqa: BLE001
+        return False
 
 
 async def _end_call(*, call_id: str, session_id: str | None) -> None:
@@ -255,8 +349,11 @@ async def _send_esl_command(command: str) -> str:
         headers = await _read_esl_headers(reader)
         return headers.get("Reply-Text") or headers.get("Job-UUID") or "accepted"
     finally:
-        writer.close()
-        await writer.wait_closed()
+        try:
+            writer.close()
+            await writer.wait_closed()
+        except OSError:
+            pass
 
 
 async def _read_esl_headers(reader) -> dict[str, str]:

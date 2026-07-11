@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { useParams } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
 import { Download, Play, Timer } from "lucide-react";
@@ -8,12 +9,34 @@ import { LoadingState } from "@/components/dashboard/loading";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { apiFetch } from "@/lib/api";
+import { API_BASE_URL, apiFetch, getToken } from "@/lib/api";
 
 export default function CallDetailsPage() {
   const params = useParams<{ id: string }>();
+  const [recordingUrl, setRecordingUrl] = useState<string | null>(null);
   const { data, isLoading } = useQuery({ queryKey: ["call-details", params.id], queryFn: () => apiFetch<any>(`/admin/call-details/${params.id}`) });
   if (isLoading || !data) return <LoadingState />;
+
+  async function loadRecording(download = false) {
+    const path = download ? data.call.recording.download : data.call.recording.playback;
+    const response = await fetch(`${API_BASE_URL}${path}`, {
+      headers: { Authorization: `Bearer ${getToken()}` },
+    });
+    if (!response.ok) return;
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    if (download) {
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `${params.id}.wav`;
+      link.click();
+      URL.revokeObjectURL(url);
+      return;
+    }
+    if (recordingUrl) URL.revokeObjectURL(recordingUrl);
+    setRecordingUrl(url);
+  }
+
   return (
     <>
       <PageHeader title="Call Details" description="Transcript, summary, recording, timeline, provider usage, latency, and cost placeholder." />
@@ -46,9 +69,13 @@ export default function CallDetailsPage() {
           </Card>
           <Card>
             <CardHeader><CardTitle>Recording</CardTitle></CardHeader>
-            <CardContent className="flex gap-2">
-              <Button variant="ghost"><Play size={15} />Playback</Button>
-              <Button variant="ghost"><Download size={15} />Download</Button>
+            <CardContent className="space-y-3">
+              <div className="flex gap-2">
+                <Button variant="ghost" disabled={data.call.recording.status !== "local"} onClick={() => loadRecording(false)}><Play size={15} />Playback</Button>
+                <Button variant="ghost" disabled={data.call.recording.status !== "local"} onClick={() => loadRecording(true)}><Download size={15} />Download</Button>
+              </div>
+              {recordingUrl ? <audio className="w-full" src={recordingUrl} controls /> : null}
+              {data.call.recording.status !== "local" ? <p className="text-xs text-slate-500">No recording file found for this call.</p> : null}
             </CardContent>
           </Card>
           <Card>

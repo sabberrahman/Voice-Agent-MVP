@@ -23,6 +23,7 @@ from app.schemas.voice import (
     ProviderSelectionRequest,
     VoiceEndRequest,
     VoiceEventRequest,
+    VoiceSpeakRequest,
     VoiceSessionResponse,
     VoiceStartRequest,
 )
@@ -60,6 +61,27 @@ async def process_voice_audio(
         "x-call-id": str(result.call_id),
         "x-session-id": str(result.session_id),
         "x-transcript": result.transcript.encode("utf-8").hex(),
+        "x-response-text": result.response_text.encode("utf-8").hex(),
+        "x-latencies-ms": result.model_dump_json(include={"latencies_ms"}),
+    }
+    return StreamingResponse(iter([audio_response]), media_type=result.audio_mime_type, headers=headers)
+
+
+@router.post("/speak")
+async def speak_voice_text(
+    payload: VoiceSpeakRequest,
+    orchestrator: VoiceOrchestrator = Depends(get_voice_orchestrator),
+) -> StreamingResponse:
+    result, audio_response = await orchestrator.synthesize_text(
+        call_id=payload.call_id,
+        session_id=payload.session_id,
+        tenant_id=payload.tenant_id,
+        language=payload.language,
+        text=payload.text,
+    )
+    headers = {
+        "x-call-id": str(result.call_id),
+        "x-session-id": str(result.session_id),
         "x-response-text": result.response_text.encode("utf-8").hex(),
         "x-latencies-ms": result.model_dump_json(include={"latencies_ms"}),
     }
@@ -111,6 +133,26 @@ async def voice_websocket(
                     tenant_id=UUID(payload["tenant_id"]) if payload.get("tenant_id") else None,
                     language=payload.get("language") or "bn-BD",
                     audio=audio,
+                )
+                await websocket.send_json(
+                    {
+                        "type": "audio_result",
+                        "payload": {
+                            **result.model_dump(mode="json"),
+                            "audio_b64": base64.b64encode(audio_response).decode("ascii"),
+                        },
+                    }
+                )
+            elif message_type == "speak":
+                payload = message.get("payload") or {}
+                call_id = UUID(payload["call_id"])
+                session_id = UUID(payload["session_id"])
+                result, audio_response = await orchestrator.synthesize_text(
+                    call_id=call_id,
+                    session_id=session_id,
+                    tenant_id=UUID(payload["tenant_id"]) if payload.get("tenant_id") else None,
+                    language=payload.get("language") or "bn-BD",
+                    text=payload["text"],
                 )
                 await websocket.send_json(
                     {

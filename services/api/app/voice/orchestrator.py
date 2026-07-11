@@ -305,6 +305,66 @@ class VoiceOrchestrator:
             providers=self.provider_registry.configured(),
         )
 
+    async def synthesize_text(
+        self,
+        *,
+        call_id: UUID,
+        session_id: UUID,
+        text: str,
+        language: str,
+        tenant_id: UUID | None = None,
+    ) -> tuple[VoiceAudioPipelineResult, bytes]:
+        tts_provider = self.provider_registry.tts()
+        providers = self.provider_registry.configured()
+        tts_started = perf_counter()
+        try:
+            tts_result = await retry_async(
+                lambda: tts_provider.synthesize(
+                    text,
+                    language=language,
+                    voice=self.settings.default_tts_voice,
+                ),
+                attempts=self.settings.provider_retry_attempts,
+            )
+            audio_response = tts_result.audio
+            audio_mime_type = tts_result.mime_type
+        except (ProviderConfigurationError, ProviderExecutionError, Exception) as exc:  # noqa: BLE001
+            audio_response = b""
+            audio_mime_type = "application/octet-stream"
+            await self.memory_store.append_event(
+                tenant_id=tenant_id,
+                call_id=call_id,
+                session_id=session_id,
+                event_type="tts.failed",
+                payload={"error": str(exc), "provider": tts_provider.name},
+            )
+        latency = round((perf_counter() - tts_started) * 1000, 2)
+        self.metrics.observe_latency("tts", latency)
+        self.metrics.observe_provider(tts_provider.name)
+        await self.memory_store.append_transcript(
+            tenant_id=tenant_id,
+            call_id=call_id,
+            session_id=session_id,
+            speaker="assistant",
+            text=text,
+            language=language,
+            confidence=None,
+            metadata={"latency_ms": latency, "provider": tts_provider.name, "kind": "greeting"},
+        )
+        return (
+            VoiceAudioPipelineResult(
+                call_id=call_id,
+                session_id=session_id,
+                transcript="",
+                response_text=text,
+                language=language,
+                providers=providers,
+                latencies_ms={"tts": latency},
+                audio_mime_type=audio_mime_type,
+            ),
+            audio_response,
+        )
+
     async def event(self, request: VoiceEventRequest) -> VoiceSessionResponse:
         await self.memory_store.append_event(
             call_id=request.call_id,

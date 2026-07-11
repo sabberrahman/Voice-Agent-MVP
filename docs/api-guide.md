@@ -13,9 +13,18 @@ Use the returned bearer token for `/admin/*`.
 Voice:
 
 - `POST /voice/start`
+- `POST /voice/speak`
 - `POST /voice/audio`
 - `POST /voice/end`
 - `POST /voice/event`
+
+HTTP-only smoke test:
+
+1. Start a session with `POST /voice/start`.
+2. Send text to `POST /voice/speak` to receive playable TTS audio.
+3. Send a WAV file to `POST /voice/audio` to run STT -> LLM -> TTS and receive playable audio.
+
+Zoiper remains a SIP/RTP client. It does not call HTTP or WebSocket directly; FreeSWITCH bridges Zoiper RTP into Dograh.
 
 Calls:
 

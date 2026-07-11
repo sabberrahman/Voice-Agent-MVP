@@ -1,9 +1,10 @@
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import httpx
-from fastapi import APIRouter, Depends
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import FileResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,6 +18,7 @@ from app.providers.factory import ProviderRegistry
 from app.voice.conversation import ConversationManager
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_user)])
+RECORDINGS_DIR = Path("/recordings")
 
 
 @router.get("/dashboard")
@@ -364,7 +366,12 @@ async def call_details(call_id: UUID, session: AsyncSession = Depends(get_sessio
             "status": call.status if call else "unknown",
             "customer": call.customer_id if call else None,
             "language_detection": call.metadata_json.get("language") if call and call.metadata_json else "bn-BD",
-            "recording": {"status": "local", "playback": None, "download": None, "future_s3_backup": True},
+            "recording": {
+                "status": "local" if _recording_path(call_id) else "missing",
+                "playback": f"/admin/recordings/{call_id}/playback",
+                "download": f"/admin/recordings/{call_id}/download",
+                "future_s3_backup": True,
+            },
             "estimated_cost": "placeholder",
         },
         "transcript": [
@@ -388,25 +395,24 @@ async def call_details(call_id: UUID, session: AsyncSession = Depends(get_sessio
 
 
 @router.get("/recordings/{call_id}/playback")
-async def recording_playback(call_id: UUID) -> JSONResponse:
-    return JSONResponse(
-        {
-            "call_id": str(call_id),
-            "status": "placeholder",
-            "message": "Local FreeSWITCH recording playback will stream from the recordings volume in the next production hardening pass.",
-        }
-    )
+async def recording_playback(call_id: UUID) -> FileResponse:
+    path = _recording_path(call_id)
+    if path is None:
+        raise HTTPException(status_code=404, detail="Recording not found")
+    return FileResponse(path, media_type="audio/wav")
 
 
 @router.get("/recordings/{call_id}/download")
-async def recording_download(call_id: UUID) -> JSONResponse:
-    return JSONResponse(
-        {
-            "call_id": str(call_id),
-            "status": "placeholder",
-            "message": "Download endpoint placeholder. Future S3 backup and signed URLs are prepared in the architecture.",
-        }
-    )
+async def recording_download(call_id: UUID) -> FileResponse:
+    path = _recording_path(call_id)
+    if path is None:
+        raise HTTPException(status_code=404, detail="Recording not found")
+    return FileResponse(path, media_type="audio/wav", filename=path.name)
+
+
+def _recording_path(call_id: UUID) -> Path | None:
+    matches = sorted(RECORDINGS_DIR.glob(f"{call_id}_*.wav"))
+    return matches[-1] if matches else None
 
 
 ROADMAP = [

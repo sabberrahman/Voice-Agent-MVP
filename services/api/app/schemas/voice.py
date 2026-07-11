@@ -27,6 +27,14 @@ class VoiceEventRequest(BaseModel):
     payload: dict = Field(default_factory=dict)
 
 
+class VoiceSpeakRequest(BaseModel):
+    call_id: UUID
+    session_id: UUID
+    tenant_id: UUID | None = None
+    language: str = "bn-BD"
+    text: str
+
+
 class ProviderSelectionRequest(BaseModel):
     stt_provider: str | None = None
     llm_provider: str | None = None

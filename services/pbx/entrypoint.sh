@@ -4,6 +4,7 @@ set -eu
 EXT_1001_PASSWORD="${FREESWITCH_EXTENSION_1001_PASSWORD:-1001pass}"
 EXT_1002_PASSWORD="${FREESWITCH_EXTENSION_1002_PASSWORD:-1002pass}"
 EVENT_SOCKET_PASSWORD="${FREESWITCH_EVENT_SOCKET_PASSWORD:-ClueCon}"
+FREESWITCH_DOMAIN="${FREESWITCH_DOMAIN:-${ZOIPER_HOST_IP:-}}"
 
 if [ -d "/usr/local/freeswitch/etc/freeswitch" ]; then
   FS_CONF_DIR="/usr/local/freeswitch/etc/freeswitch"
@@ -14,6 +15,7 @@ else
 fi
 EVENT_SOCKET_CONF="${FS_CONF_DIR}/autoload_configs/event_socket.conf.xml"
 MODULES_CONF="${FS_CONF_DIR}/autoload_configs/modules.conf.xml"
+INTERNAL_SIP_PROFILE="${FS_CONF_DIR}/sip_profiles/internal.xml"
 
 if [ ! -f "${FS_CONF_DIR}/freeswitch.xml" ]; then
   mkdir -p "${FS_CONF_DIR}"
@@ -34,6 +36,16 @@ sed -i "s|<param name=\"listen-ip\" value=\"::\"/>|<param name=\"listen-ip\" val
 sed -i "s|<param name=\"listen-ip\" value=\"127.0.0.1\"/>|<param name=\"listen-ip\" value=\"0.0.0.0\"/>|g" "${EVENT_SOCKET_CONF}"
 sed -i "s|<param name=\"password\" value=\"[^\"]*\"/>|<param name=\"password\" value=\"${EVENT_SOCKET_PASSWORD}\"/>|g" "${EVENT_SOCKET_CONF}"
 
+if [ -n "${FREESWITCH_DOMAIN}" ] && [ -f "${INTERNAL_SIP_PROFILE}" ]; then
+  for param in sip-ip rtp-ip ext-sip-ip ext-rtp-ip; do
+    sed -i "/<param name=\"${param}\"/d" "${INTERNAL_SIP_PROFILE}"
+  done
+  sed -i "/<settings>/a\\    <param name=\"sip-ip\" value=\"0.0.0.0\"/>\\
+    <param name=\"rtp-ip\" value=\"0.0.0.0\"/>\\
+    <param name=\"ext-sip-ip\" value=\"${FREESWITCH_DOMAIN}\"/>\\
+    <param name=\"ext-rtp-ip\" value=\"${FREESWITCH_DOMAIN}\"/>" "${INTERNAL_SIP_PROFILE}"
+fi
+
 if ! grep -Eq '^[[:space:]]*<load module="mod_event_socket"/>' "${MODULES_CONF}"; then
   sed -i 's|</modules>|  <load module="mod_event_socket"/>\
 </modules>|' "${MODULES_CONF}"
@@ -48,5 +60,18 @@ trap '/usr/bin/freeswitch -stop' TERM
 
 /usr/bin/freeswitch -nc -nf -nonat &
 pid="$!"
+
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  if fs_cli -x status >/dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+done
+
+if ! fs_cli -x 'sofia status' >/dev/null 2>&1; then
+  fs_cli -x 'load mod_sofia' >/dev/null 2>&1 || true
+fi
+
+fs_cli -x 'sofia profile internal rescan' >/dev/null 2>&1 || true
 
 wait "$pid"
