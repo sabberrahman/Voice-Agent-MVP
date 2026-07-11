@@ -1,0 +1,10 @@
+<include>
+  <extension name="local_extensions">
+    <condition field="destination_number" expression="^(1001|1002)$">
+      <action application="set" data="recording_follow_transfer=true"/>
+      <action application="set" data="recording_file=/recordings/${uuid}_${caller_id_number}_to_${destination_number}.wav"/>
+      <action application="record_session" data="${recording_file}"/>
+      <action application="bridge" data="user/${destination_number}@${domain_name}"/>
+    </condition>
+  </extension>
+</include>

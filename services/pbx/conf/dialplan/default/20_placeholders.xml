@@ -1,0 +1,24 @@
+<include>
+  <extension name="voxagent_outbound_placeholder">
+    <condition field="destination_number" expression="^9(\d+)$">
+      <action application="log" data="INFO Outbound SIP trunk placeholder for ${destination_number}"/>
+      <action application="hangup" data="NORMAL_TEMPORARY_FAILURE"/>
+    </condition>
+  </extension>
+
+  <extension name="voxagent_ivr_placeholder">
+    <condition field="destination_number" expression="^7000$">
+      <action application="answer"/>
+      <action application="playback" data="ivr/ivr-welcome_to_freeswitch.wav"/>
+      <action application="hangup"/>
+    </condition>
+  </extension>
+
+  <extension name="voxagent_queue_placeholder">
+    <condition field="destination_number" expression="^8000$">
+      <action application="answer"/>
+      <action application="log" data="INFO Queue placeholder reached"/>
+      <action application="hangup"/>
+    </condition>
+  </extension>
+</include>

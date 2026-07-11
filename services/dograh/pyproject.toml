@@ -1,0 +1,19 @@
+[project]
+name = "voxagent-dograh-bridge"
+version = "0.1.0"
+description = "Dograh routing bridge placeholder for VoxAgent MVP"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.111.0",
+  "httpx>=0.27.0",
+  "python-multipart>=0.0.9",
+  "pydantic-settings>=2.3.4",
+  "uvicorn[standard]>=0.30.1",
+]
+
+[build-system]
+requires = ["setuptools>=70.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
