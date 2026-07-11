@@ -34,6 +34,25 @@ class ConversationManager:
         self._states[str(session_id)] = state
         return state
 
+    def restore(
+        self,
+        call_id: UUID,
+        session_id: UUID,
+        *,
+        language: str,
+        history: list[dict] | None = None,
+        last_response: str | None = None,
+    ) -> ConversationState:
+        state = ConversationState(
+            call_id=call_id,
+            session_id=session_id,
+            language=language,
+            history=history or [],
+            last_response=last_response,
+        )
+        self._states[str(session_id)] = state
+        return state
+
     def get(self, session_id: UUID) -> ConversationState | None:
         return self._states.get(str(session_id))
 

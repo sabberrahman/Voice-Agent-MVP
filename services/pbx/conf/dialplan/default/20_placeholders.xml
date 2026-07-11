@@ -6,11 +6,18 @@
     </condition>
   </extension>
 
-  <extension name="voxagent_ivr_placeholder">
+  <extension name="voxagent_ai_agent">
     <condition field="destination_number" expression="^7000$">
+      <action application="set" data="recording_follow_transfer=true"/>
+      <action application="set" data="recording_file=/recordings/${uuid}_${caller_id_number}_to_ai_agent.wav"/>
+      <action application="record_session" data="${recording_file}"/>
+      <action application="set" data="STREAM_BUFFER_SIZE=100"/>
+      <action application="set" data="STREAM_HEART_BEAT=15"/>
+      <action application="set" data="STREAM_SUPPRESS_LOG=true"/>
       <action application="answer"/>
-      <action application="playback" data="ivr/ivr-welcome_to_freeswitch.wav"/>
-      <action application="hangup"/>
+      <action application="sleep" data="500"/>
+      <action application="eval" data="${uuid_audio_stream ${uuid} start ws://dograh:8010/freeswitch/media?call_id=${uuid}&amp;from=${caller_id_number}&amp;to=7000 mono 8k ${uuid}}"/>
+      <action application="park"/>
     </condition>
   </extension>
 

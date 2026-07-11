@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     app_port: int = 8000
     app_secret_key: str = Field(default="change-me")
     api_base_url: str = "http://api:8000"
+    dograh_api_url: str = "http://dograh:8010"
     web_port: int = 3000
 
     postgres_host: str = "postgres"

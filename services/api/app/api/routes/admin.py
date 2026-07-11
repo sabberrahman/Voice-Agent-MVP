@@ -1,6 +1,7 @@
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
+import httpx
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
@@ -10,7 +11,7 @@ from app.auth.jwt import require_user
 from app.config.settings import Settings, get_settings
 from app.core.dependencies import get_conversation_manager, get_metrics_collector
 from app.db.session import get_redis, get_session
-from app.models.domain import Call, CallEvent, Customer, Summary, Transcript
+from app.models.domain import Call, CallEvent, Customer, Summary, Tenant, Transcript
 from app.observability.metrics import MetricsCollector
 from app.providers.factory import ProviderRegistry
 from app.voice.conversation import ConversationManager
@@ -215,6 +216,72 @@ async def admin_customers(session: AsyncSession = Depends(get_session)) -> dict:
     }
 
 
+@router.post("/seed-zoiper-customers")
+async def seed_zoiper_customers(session: AsyncSession = Depends(get_session)) -> dict:
+    from app.repositories.voice import DEFAULT_TENANT_ID
+
+    tenant = await session.get(Tenant, DEFAULT_TENANT_ID)
+    if tenant is None:
+        session.add(
+            Tenant(
+                id=DEFAULT_TENANT_ID,
+                name="Local Development Tenant",
+                slug="local-development",
+                locale="bn-BD",
+                is_active=True,
+                settings={},
+            )
+        )
+        await session.flush()
+
+    seeds = [
+        {
+            "external_id": "zoiper-1001",
+            "name": "Zoiper 1001 Test Customer",
+            "phone_number": "1001",
+            "language": "bn-BD",
+            "metadata_json": {
+                "company": "Local SIP Lab",
+                "notes": "Primary Zoiper user for inbound and outbound AI call testing.",
+                "total_calls": 0,
+            },
+        },
+        {
+            "external_id": "zoiper-1002",
+            "name": "Zoiper 1002 Test Customer",
+            "phone_number": "1002",
+            "language": "bn-BD",
+            "metadata_json": {
+                "company": "Local SIP Lab",
+                "notes": "Second softphone user for extension-to-extension testing.",
+                "total_calls": 0,
+            },
+        },
+    ]
+    created = 0
+    updated = 0
+    for seed in seeds:
+        existing = (
+            await session.execute(
+                select(Customer).where(
+                    Customer.tenant_id == DEFAULT_TENANT_ID,
+                    Customer.phone_number == seed["phone_number"],
+                )
+            )
+        ).scalar_one_or_none()
+        if existing is None:
+            session.add(Customer(tenant_id=DEFAULT_TENANT_ID, **seed))
+            created += 1
+        else:
+            existing.external_id = seed["external_id"]
+            existing.name = seed["name"]
+            existing.language = seed["language"]
+            existing.metadata_json = {**(existing.metadata_json or {}), **seed["metadata_json"]}
+            updated += 1
+    await session.commit()
+    return {"status": "seeded", "created": created, "updated": updated, "customers": ["1001", "1002"]}
+
+
 @router.get("/logs")
 async def logs() -> dict:
     return {
@@ -262,6 +329,20 @@ async def simulate_outbound_call(session: AsyncSession = Depends(get_session)) -
         payload={"status": "queued", "note": "Telephony dialing placeholder for investor demo."},
     )
     return {"call_id": call_id, "status": "queued", "mode": "simulation"}
+
+
+@router.post("/start-outbound-zoiper/{extension}")
+async def start_outbound_zoiper(
+    extension: str,
+    settings: Settings = Depends(get_settings),
+) -> dict:
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        response = await client.post(
+            f"{settings.dograh_api_url}/outbound/zoiper",
+            json={"extension": extension},
+        )
+        response.raise_for_status()
+        return response.json()
 
 
 @router.get("/roadmap")

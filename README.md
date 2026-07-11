@@ -20,6 +20,14 @@ The MVP now includes the AI voice pipeline and a polished internal SaaS dashboar
 docker compose up --build
 ```
 
+Recommended cross-platform starter for Git Bash, Linux, or macOS:
+
+```bash
+bash ./scripts/dev.sh
+```
+
+This detects the current LAN/WiFi IP, updates `.env`, prints Zoiper copy-paste settings, then starts Docker Compose.
+
 This starts every service and runs API database migrations automatically.
 
 Optional development migration rerun:
@@ -36,7 +44,9 @@ Useful endpoints:
 - Health: `http://localhost:8000/health`
 - Ready: `http://localhost:8000/ready`
 - Providers: `http://localhost:8000/providers`
-- Audio pipeline: `POST http://localhost:8000/voice/audio`
+- WebSocket audio pipeline: `ws://localhost:8000/voice/ws`
+- Dograh WebSocket bridge: `ws://localhost:8010/ws`
+- Legacy audio pipeline: `POST http://localhost:8000/voice/audio`
 - Metrics: `http://localhost:8000/metrics`
 - Dograh bridge health: `http://localhost:8010/health`
 
@@ -53,7 +63,7 @@ Extension `1001`
 
 - User: `1001`
 - Password: `1001pass`
-- Domain/Host: your Docker host IP, usually `127.0.0.1`
+- Domain/Host: the `Host / Domain` value printed by `docker compose up --build`
 - Transport: UDP
 - Port: `5060`
 
@@ -61,11 +71,18 @@ Extension `1002`
 
 - User: `1002`
 - Password: `1002pass`
-- Domain/Host: your Docker host IP, usually `127.0.0.1`
+- Domain/Host: the `Host / Domain` value printed by `docker compose up --build`
 - Transport: UDP
 - Port: `5060`
 
-Call `1002` from `1001`, or `1001` from `1002`. Recordings are stored in the Docker volume `voxagent-mvp_freeswitch_recordings`.
+Call `7000` from `1001` to reach the AI agent. Call `1002` from `1001`, or `1001` from `1002`, only when you want to test human-to-human SIP registration. Recordings are stored in the Docker volume `voxagent-mvp_freeswitch_recordings`.
+
+Outbound AI-to-human test:
+
+```powershell
+$token = (Invoke-RestMethod -Method Post http://localhost:8000/auth/login -Body (@{email="admin@voxagent.local";password="admin123"} | ConvertTo-Json) -ContentType "application/json").access_token
+Invoke-RestMethod -Method Post http://localhost:8000/admin/start-outbound-zoiper/1001 -Headers @{Authorization="Bearer $token"}
+```
 
 ## Architecture
 
@@ -74,7 +91,8 @@ Dograh routes session events to the Voice Orchestrator. Dograh does not call STT
 ```text
 SIP softphone
   -> FreeSWITCH
-  -> Dograh routing bridge
+  -> mod_audio_stream
+  -> Dograh WebSocket bridge
   -> Voice Orchestrator
   -> STT adapter interface
   -> Context Builder
@@ -83,6 +101,8 @@ SIP softphone
   -> Memory
   -> TTS adapter interface
 ```
+
+Redis is the live-call memory layer. During a call, call metadata, events, transcript turns, recent conversation history, and live state are written to Redis first. PostgreSQL persistence is deferred until `/voice/end`, so database writes are not on the audio turn latency path.
 
 ## Provider Agnostic Design
 

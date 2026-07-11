@@ -36,9 +36,20 @@ class VoiceOrchestrator:
         call_id = request.call_id or uuid4()
         session_id = uuid4()
         self.conversation_manager.start(call_id, session_id, language=request.language)
-        await self.memory_store.save_active_session(
-            session_id,
-            {"call_id": call_id, "language": request.language, "state": "active"},
+        await self.memory_store.start_call(
+            call_id=call_id,
+            session_id=session_id,
+            tenant_id=request.tenant_id,
+            direction=request.direction,
+            language=request.language,
+            metadata=request.metadata,
+        )
+        await self.memory_store.append_event(
+            tenant_id=request.tenant_id,
+            call_id=call_id,
+            session_id=session_id,
+            event_type="voice.start",
+            payload=request.model_dump(mode="json"),
         )
         if repository is not None:
             await repository.create_call_session(
@@ -76,7 +87,26 @@ class VoiceOrchestrator:
     ) -> tuple[VoiceAudioPipelineResult, bytes]:
         state = self.conversation_manager.get(session_id)
         if state is None:
-            state = self.conversation_manager.start(call_id, session_id, language=language)
+            cached = await self.memory_store.load_active_session(session_id)
+            if cached is not None:
+                state = self.conversation_manager.restore(
+                    call_id=call_id,
+                    session_id=session_id,
+                    language=cached.get("language", language),
+                    history=cached.get("history") or [],
+                    last_response=cached.get("last_response"),
+                )
+            else:
+                state = self.conversation_manager.start(call_id, session_id, language=language)
+        if await self.memory_store.load_call(call_id) is None:
+            await self.memory_store.start_call(
+                call_id=call_id,
+                session_id=session_id,
+                tenant_id=tenant_id,
+                direction="inbound",
+                language=language,
+                metadata={"created_from": "audio"},
+            )
 
         stt_provider = self.provider_registry.stt()
         llm_provider = self.provider_registry.llm()
@@ -102,14 +132,13 @@ class VoiceOrchestrator:
             transcript = "আমি অডিওটি বুঝতে পারিনি।"
             detected_language = language
             transcript_result = None
-            if repository is not None:
-                await repository.save_event(
-                    tenant_id=tenant_id,
-                    call_id=call_id,
-                    session_id=session_id,
-                    event_type="stt.failed",
-                    payload={"error": str(exc), "provider": stt_provider.name},
-                )
+            await self.memory_store.append_event(
+                tenant_id=tenant_id,
+                call_id=call_id,
+                session_id=session_id,
+                event_type="stt.failed",
+                payload={"error": str(exc), "provider": stt_provider.name},
+            )
         latencies["stt"] = round((perf_counter() - stt_started) * 1000, 2)
         self.metrics.observe_latency("stt", latencies["stt"])
         self.metrics.observe_provider(stt_provider.name)
@@ -120,17 +149,16 @@ class VoiceOrchestrator:
             language=detected_language,
             metadata={"confidence": getattr(transcript_result, "confidence", None)},
         )
-        if repository is not None:
-            await repository.save_transcript(
-                tenant_id=tenant_id,
-                call_id=call_id,
-                session_id=session_id,
-                speaker="customer",
-                text=transcript,
-                language=detected_language,
-                confidence=getattr(transcript_result, "confidence", None),
-                metadata={"latency_ms": latencies["stt"], "provider": stt_provider.name},
-            )
+        await self.memory_store.append_transcript(
+            tenant_id=tenant_id,
+            call_id=call_id,
+            session_id=session_id,
+            speaker="customer",
+            text=transcript,
+            language=detected_language,
+            confidence=getattr(transcript_result, "confidence", None),
+            metadata={"latency_ms": latencies["stt"], "provider": stt_provider.name},
+        )
 
         context = await self.context_builder.build(
             transcript=transcript,
@@ -148,30 +176,28 @@ class VoiceOrchestrator:
             response_text = llm_response.text or "দুঃখিত, আমি এখন উত্তর দিতে পারছি না।"
         except (ProviderConfigurationError, ProviderExecutionError, Exception) as exc:  # noqa: BLE001
             response_text = "দুঃখিত, আমি এখন সিস্টেমে সাময়িক সমস্যা পাচ্ছি। একটু পরে আবার চেষ্টা করবেন।"
-            if repository is not None:
-                await repository.save_event(
-                    tenant_id=tenant_id,
-                    call_id=call_id,
-                    session_id=session_id,
-                    event_type="llm.failed",
-                    payload={"error": str(exc), "provider": llm_provider.name},
-                )
+            await self.memory_store.append_event(
+                tenant_id=tenant_id,
+                call_id=call_id,
+                session_id=session_id,
+                event_type="llm.failed",
+                payload={"error": str(exc), "provider": llm_provider.name},
+            )
         latencies["llm"] = round((perf_counter() - llm_started) * 1000, 2)
         self.metrics.observe_latency("llm", latencies["llm"])
         self.metrics.observe_provider(llm_provider.name)
 
         state.add_turn("assistant", response_text, language=detected_language)
-        if repository is not None:
-            await repository.save_transcript(
-                tenant_id=tenant_id,
-                call_id=call_id,
-                session_id=session_id,
-                speaker="assistant",
-                text=response_text,
-                language=detected_language,
-                confidence=None,
-                metadata={"latency_ms": latencies["llm"], "provider": llm_provider.name},
-            )
+        await self.memory_store.append_transcript(
+            tenant_id=tenant_id,
+            call_id=call_id,
+            session_id=session_id,
+            speaker="assistant",
+            text=response_text,
+            language=detected_language,
+            confidence=None,
+            metadata={"latency_ms": latencies["llm"], "provider": llm_provider.name},
+        )
 
         tts_started = perf_counter()
         try:
@@ -188,14 +214,13 @@ class VoiceOrchestrator:
         except (ProviderConfigurationError, ProviderExecutionError, Exception) as exc:  # noqa: BLE001
             audio_response = response_text.encode("utf-8")
             audio_mime_type = "text/plain; charset=utf-8"
-            if repository is not None:
-                await repository.save_event(
-                    tenant_id=tenant_id,
-                    call_id=call_id,
-                    session_id=session_id,
-                    event_type="tts.failed",
-                    payload={"error": str(exc), "provider": tts_provider.name},
-                )
+            await self.memory_store.append_event(
+                tenant_id=tenant_id,
+                call_id=call_id,
+                session_id=session_id,
+                event_type="tts.failed",
+                payload={"error": str(exc), "provider": tts_provider.name},
+            )
         latencies["tts"] = round((perf_counter() - tts_started) * 1000, 2)
         self.metrics.observe_latency("tts", latencies["tts"])
         self.metrics.observe_provider(tts_provider.name)
@@ -209,14 +234,13 @@ class VoiceOrchestrator:
                 "history": state.history[-12:],
             },
         )
-        if repository is not None:
-            await repository.save_event(
-                tenant_id=tenant_id,
-                call_id=call_id,
-                session_id=session_id,
-                event_type="voice.audio.processed",
-                payload={"latencies_ms": latencies, "providers": providers},
-            )
+        await self.memory_store.append_event(
+            tenant_id=tenant_id,
+            call_id=call_id,
+            session_id=session_id,
+            event_type="voice.audio.processed",
+            payload={"latencies_ms": latencies, "providers": providers},
+        )
 
         return (
             VoiceAudioPipelineResult(
@@ -240,30 +264,39 @@ class VoiceOrchestrator:
         tenant_id: UUID | None = None,
     ) -> VoiceSessionResponse:
         state = self.conversation_manager.end(request.session_id) if request.session_id else None
+        if state is None and request.session_id:
+            cached = await self.memory_store.load_active_session(request.session_id)
+            if cached is not None:
+                state = self.conversation_manager.restore(
+                    call_id=request.call_id,
+                    session_id=request.session_id,
+                    language=cached.get("language", self.settings.default_language),
+                    history=cached.get("history") or [],
+                    last_response=cached.get("last_response"),
+                )
+        history = state.history if state is not None else []
+        language = state.language if state is not None else self.settings.default_language
+        summary_text = await self._generate_summary(history, language)
+        action_items = {
+            "key_topics": [],
+            "action_items": [],
+            "sentiment": "placeholder",
+            "language_used": language,
+            "cost_estimation": "placeholder",
+        }
+        await self.memory_store.append_event(
+            tenant_id=tenant_id,
+            call_id=request.call_id,
+            session_id=request.session_id,
+            event_type="voice.end",
+            payload=request.model_dump(mode="json"),
+        )
+        await self.memory_store.finish_call(request.call_id, summary=summary_text, action_items=action_items)
+        if repository is not None:
+            buffers = await self.memory_store.load_call_buffers(request.call_id)
+            await repository.flush_call_buffers(**buffers)
         if request.session_id:
             await self.memory_store.delete_active_session(request.session_id)
-        if state is not None and repository is not None:
-            summary_text = await self._generate_summary(state.history, state.language)
-            await repository.save_summary(
-                tenant_id=tenant_id,
-                call_id=request.call_id,
-                language=state.language,
-                summary=summary_text,
-                action_items={
-                    "key_topics": [],
-                    "action_items": [],
-                    "sentiment": "placeholder",
-                    "language_used": state.language,
-                    "cost_estimation": "placeholder",
-                },
-            )
-            await repository.save_event(
-                tenant_id=tenant_id,
-                call_id=request.call_id,
-                session_id=request.session_id,
-                event_type="voice.end",
-                payload=request.model_dump(mode="json"),
-            )
         return VoiceSessionResponse(
             call_id=request.call_id,
             session_id=request.session_id,
@@ -273,6 +306,12 @@ class VoiceOrchestrator:
         )
 
     async def event(self, request: VoiceEventRequest) -> VoiceSessionResponse:
+        await self.memory_store.append_event(
+            call_id=request.call_id,
+            session_id=request.session_id,
+            event_type=request.event_type,
+            payload=request.payload,
+        )
         return VoiceSessionResponse(
             call_id=request.call_id,
             session_id=request.session_id,

@@ -1,6 +1,36 @@
 name: voxagent-mvp
 
 services:
+  zoiper-info:
+    image: alpine:3.20
+    env_file: .env
+    command:
+      - sh
+      - -c
+      - |
+        echo "";
+        echo "============================================================";
+        echo " ZOIPER COPY-PASTE SETTINGS";
+        echo "============================================================";
+        echo " Host / Domain : ${ZOIPER_HOST_IP:-127.0.0.1}";
+        echo " SIP Port      : ${FREESWITCH_SIP_PORT:-5060}";
+        echo " Transport     : UDP";
+        echo "";
+        echo " Account 1001";
+        echo "   User        : 1001";
+        echo "   Password    : ${FREESWITCH_EXTENSION_1001_PASSWORD:-1001pass}";
+        echo "   Call AI     : 7000";
+        echo "";
+        echo " Account 1002";
+        echo "   User        : 1002";
+        echo "   Password    : ${FREESWITCH_EXTENSION_1002_PASSWORD:-1002pass}";
+        echo "";
+        echo " Outbound AI test endpoint:";
+        echo "   POST http://localhost:${APP_PORT:-8000}/admin/start-outbound-zoiper/1001";
+        echo "============================================================";
+        echo "";
+    restart: "no"
+
   api:
     build:
       context: ./services/api
@@ -28,6 +58,8 @@ services:
     env_file: .env
     depends_on:
       api:
+        condition: service_healthy
+      freeswitch:
         condition: service_healthy
     ports:
       - "${DOGRAH_PORT:-8010}:8010"

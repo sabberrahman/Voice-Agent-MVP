@@ -156,6 +156,88 @@ class VoiceRepository:
             call.ended_at = datetime.now(UTC)
         await self.session.commit()
 
+    async def flush_call_buffers(
+        self,
+        *,
+        call: dict | None,
+        events: list[dict],
+        transcripts: list[dict],
+    ) -> None:
+        if call is None:
+            return
+        call_id = UUID(call["call_id"])
+        tenant_id = UUID(call["tenant_id"]) if call.get("tenant_id") else None
+        tenant_id = await self.ensure_call(
+            call_id=call_id,
+            tenant_id=tenant_id,
+            direction=call.get("direction", "inbound"),
+            language=call.get("language", "bn-BD"),
+        )
+        db_call = await self.session.get(Call, call_id)
+        if db_call is not None:
+            db_call.status = call.get("status", db_call.status)
+            metadata = db_call.metadata_json or {}
+            metadata.update(call.get("metadata") or {})
+            metadata["language"] = call.get("language", metadata.get("language", "bn-BD"))
+            db_call.metadata_json = metadata
+            if call.get("status") == "completed":
+                db_call.ended_at = datetime.now(UTC)
+
+        session_id = UUID(call["session_id"]) if call.get("session_id") else None
+        if session_id is not None and await self.session.get(CallSession, session_id) is None:
+            self.session.add(
+                CallSession(
+                    id=session_id,
+                    call_id=call_id,
+                    tenant_id=tenant_id,
+                    state=call.get("status", "completed"),
+                    language=call.get("language", "bn-BD"),
+                    context={},
+                )
+            )
+
+        existing_transcripts = await self.get_transcript(call_id)
+        if not existing_transcripts:
+            for item in transcripts:
+                self.session.add(
+                    Transcript(
+                        tenant_id=tenant_id,
+                        call_id=call_id,
+                        session_id=UUID(item["session_id"]) if item.get("session_id") else None,
+                        speaker=item["speaker"],
+                        text=item["text"],
+                        language=item.get("language", call.get("language", "bn-BD")),
+                        confidence=(
+                            int(item["confidence"] * 100)
+                            if item.get("confidence") is not None
+                            else None
+                        ),
+                    )
+                )
+
+        for item in events:
+            self.session.add(
+                CallEvent(
+                    tenant_id=tenant_id,
+                    call_id=call_id,
+                    session_id=UUID(item["session_id"]) if item.get("session_id") else None,
+                    event_type=item["event_type"],
+                    payload=item.get("payload") or {},
+                )
+            )
+
+        if call.get("summary"):
+            self.session.add(
+                Summary(
+                    tenant_id=tenant_id,
+                    call_id=call_id,
+                    language=call.get("language", "bn-BD"),
+                    summary=call["summary"],
+                    action_items=call.get("action_items") or {},
+                )
+            )
+        await self.session.commit()
+
     async def _resolve_tenant(self, tenant_id: UUID | None) -> UUID:
         tenant_id = tenant_id or DEFAULT_TENANT_ID
         tenant = await self.session.get(Tenant, tenant_id)
