@@ -136,7 +136,7 @@ async def voice_websocket(
                 )
                 await websocket.send_json(
                     {
-                        "type": "audio_result",
+                        "type": "audio_result" if audio_response else "text_result",
                         "payload": {
                             **result.model_dump(mode="json"),
                             "audio_b64": base64.b64encode(audio_response).decode("ascii"),
@@ -156,7 +156,7 @@ async def voice_websocket(
                 )
                 await websocket.send_json(
                     {
-                        "type": "audio_result",
+                        "type": "audio_result" if audio_response else "text_result",
                         "payload": {
                             **result.model_dump(mode="json"),
                             "audio_b64": base64.b64encode(audio_response).decode("ascii"),

@@ -19,7 +19,7 @@ class ProviderRegistry:
         return {
             "stt": self.settings.default_stt_provider,
             "llm": self.settings.default_llm_provider,
-            "tts": self.settings.default_tts_provider,
+            "tts": self.settings.default_tts_provider if self.settings.enable_tts else "disabled",
         }
 
     def available(self) -> dict[str, list[str]]:

@@ -110,7 +110,6 @@ class VoiceOrchestrator:
 
         stt_provider = self.provider_registry.stt()
         llm_provider = self.provider_registry.llm()
-        tts_provider = self.provider_registry.tts()
         providers = self.provider_registry.configured()
         latencies: dict[str, float] = {}
         if repository is not None:
@@ -199,31 +198,43 @@ class VoiceOrchestrator:
             metadata={"latency_ms": latencies["llm"], "provider": llm_provider.name},
         )
 
-        tts_started = perf_counter()
-        try:
-            tts_result = await retry_async(
-                lambda: tts_provider.synthesize(
-                    response_text,
-                    language=detected_language,
-                    voice=self.settings.default_tts_voice,
-                ),
-                attempts=self.settings.provider_retry_attempts,
-            )
-            audio_response = tts_result.audio
-            audio_mime_type = tts_result.mime_type
-        except (ProviderConfigurationError, ProviderExecutionError, Exception) as exc:  # noqa: BLE001
-            audio_response = response_text.encode("utf-8")
-            audio_mime_type = "text/plain; charset=utf-8"
+        if self.settings.enable_tts:
+            tts_provider = self.provider_registry.tts()
+            tts_started = perf_counter()
+            try:
+                tts_result = await retry_async(
+                    lambda: tts_provider.synthesize(
+                        response_text,
+                        language=detected_language,
+                        voice=self.settings.default_tts_voice,
+                    ),
+                    attempts=self.settings.provider_retry_attempts,
+                )
+                audio_response = tts_result.audio
+                audio_mime_type = tts_result.mime_type
+            except (ProviderConfigurationError, ProviderExecutionError, Exception) as exc:  # noqa: BLE001
+                audio_response = response_text.encode("utf-8")
+                audio_mime_type = "text/plain; charset=utf-8"
+                await self.memory_store.append_event(
+                    tenant_id=tenant_id,
+                    call_id=call_id,
+                    session_id=session_id,
+                    event_type="tts.failed",
+                    payload={"error": str(exc), "provider": tts_provider.name},
+                )
+            latencies["tts"] = round((perf_counter() - tts_started) * 1000, 2)
+            self.metrics.observe_latency("tts", latencies["tts"])
+            self.metrics.observe_provider(tts_provider.name)
+        else:
+            audio_response = b""
+            audio_mime_type = "application/octet-stream"
             await self.memory_store.append_event(
                 tenant_id=tenant_id,
                 call_id=call_id,
                 session_id=session_id,
-                event_type="tts.failed",
-                payload={"error": str(exc), "provider": tts_provider.name},
+                event_type="tts.skipped",
+                payload={"reason": "ENABLE_TTS=false"},
             )
-        latencies["tts"] = round((perf_counter() - tts_started) * 1000, 2)
-        self.metrics.observe_latency("tts", latencies["tts"])
-        self.metrics.observe_provider(tts_provider.name)
 
         await self.memory_store.save_active_session(
             session_id,
@@ -314,6 +325,20 @@ class VoiceOrchestrator:
         language: str,
         tenant_id: UUID | None = None,
     ) -> tuple[VoiceAudioPipelineResult, bytes]:
+        if not self.settings.enable_tts:
+            return (
+                VoiceAudioPipelineResult(
+                    call_id=call_id,
+                    session_id=session_id,
+                    transcript="",
+                    response_text=text,
+                    language=language,
+                    providers=self.provider_registry.configured(),
+                    latencies_ms={},
+                    audio_mime_type="application/octet-stream",
+                ),
+                b"",
+            )
         tts_provider = self.provider_registry.tts()
         providers = self.provider_registry.configured()
         tts_started = perf_counter()

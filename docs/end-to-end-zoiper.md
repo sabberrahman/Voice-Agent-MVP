@@ -88,6 +88,15 @@ AI provider setup currently uses:
 - TTS: Cartesia
 - Default Cartesia voice: Rubul male
 
+For STT + LLM-only testing, set both flags to false and restart `api` and `dograh`:
+
+```env
+ENABLE_TTS=false
+DOGRAH_ENABLE_TTS=false
+```
+
+In this mode Zoiper will connect and stay silent, while caller audio is still sent through STT and the LLM response is saved in transcripts/live call state.
+
 Stop everything:
 
 ```powershell

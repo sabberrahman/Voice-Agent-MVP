@@ -5,6 +5,8 @@ EXT_1001_PASSWORD="${FREESWITCH_EXTENSION_1001_PASSWORD:-1001pass}"
 EXT_1002_PASSWORD="${FREESWITCH_EXTENSION_1002_PASSWORD:-1002pass}"
 EVENT_SOCKET_PASSWORD="${FREESWITCH_EVENT_SOCKET_PASSWORD:-ClueCon}"
 FREESWITCH_DOMAIN="${FREESWITCH_DOMAIN:-${ZOIPER_HOST_IP:-}}"
+FREESWITCH_RTP_START="${FREESWITCH_RTP_START:-16384}"
+FREESWITCH_RTP_END="${FREESWITCH_RTP_END:-16484}"
 
 if [ -d "/usr/local/freeswitch/etc/freeswitch" ]; then
   FS_CONF_DIR="/usr/local/freeswitch/etc/freeswitch"
@@ -15,6 +17,7 @@ else
 fi
 EVENT_SOCKET_CONF="${FS_CONF_DIR}/autoload_configs/event_socket.conf.xml"
 MODULES_CONF="${FS_CONF_DIR}/autoload_configs/modules.conf.xml"
+SWITCH_CONF="${FS_CONF_DIR}/autoload_configs/switch.conf.xml"
 INTERNAL_SIP_PROFILE="${FS_CONF_DIR}/sip_profiles/internal.xml"
 
 if [ ! -f "${FS_CONF_DIR}/freeswitch.xml" ]; then
@@ -35,6 +38,13 @@ sed -i "s|__EXT_1002_PASSWORD__|${EXT_1002_PASSWORD}|g" "${FS_CONF_DIR}/director
 sed -i "s|<param name=\"listen-ip\" value=\"::\"/>|<param name=\"listen-ip\" value=\"0.0.0.0\"/>|g" "${EVENT_SOCKET_CONF}"
 sed -i "s|<param name=\"listen-ip\" value=\"127.0.0.1\"/>|<param name=\"listen-ip\" value=\"0.0.0.0\"/>|g" "${EVENT_SOCKET_CONF}"
 sed -i "s|<param name=\"password\" value=\"[^\"]*\"/>|<param name=\"password\" value=\"${EVENT_SOCKET_PASSWORD}\"/>|g" "${EVENT_SOCKET_CONF}"
+
+if [ -f "${SWITCH_CONF}" ]; then
+  sed -i "/<param name=\"rtp-start-port\"/d" "${SWITCH_CONF}"
+  sed -i "/<param name=\"rtp-end-port\"/d" "${SWITCH_CONF}"
+  sed -i "/<settings>/a\\    <param name=\"rtp-start-port\" value=\"${FREESWITCH_RTP_START}\"/>\\
+    <param name=\"rtp-end-port\" value=\"${FREESWITCH_RTP_END}\"/>" "${SWITCH_CONF}"
+fi
 
 if [ -n "${FREESWITCH_DOMAIN}" ] && [ -f "${INTERNAL_SIP_PROFILE}" ]; then
   for param in sip-ip rtp-ip ext-sip-ip ext-rtp-ip; do

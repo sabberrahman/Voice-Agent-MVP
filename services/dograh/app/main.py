@@ -1,6 +1,8 @@
 import asyncio
+import audioop
 import base64
 import json
+import logging
 import os
 import wave
 from io import BytesIO
@@ -22,10 +24,18 @@ FREESWITCH_ESL_HOST = os.getenv("FREESWITCH_ESL_HOST", "freeswitch")
 FREESWITCH_ESL_PORT = int(os.getenv("FREESWITCH_ESL_PORT", "8021"))
 FREESWITCH_EVENT_SOCKET_PASSWORD = os.getenv("FREESWITCH_EVENT_SOCKET_PASSWORD", "ClueCon")
 DOGRAH_MEDIA_CHUNK_MS = int(os.getenv("DOGRAH_MEDIA_CHUNK_MS", "1200"))
+DOGRAH_MIN_AUDIO_RMS = int(os.getenv("DOGRAH_MIN_AUDIO_RMS", "50"))
 DOGRAH_GREETING_TEXT = os.getenv("DOGRAH_GREETING_TEXT", "Hello, VoxAgent is ready. How can I help you?")
 DOGRAH_DEFAULT_LANGUAGE = os.getenv("DOGRAH_DEFAULT_LANGUAGE") or os.getenv("DEFAULT_LANGUAGE", "bn-BD")
+DOGRAH_ENABLE_TTS = os.getenv("DOGRAH_ENABLE_TTS", os.getenv("ENABLE_TTS", "true")).lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 RECORDINGS_DIR = Path(os.getenv("DOGRAH_RECORDINGS_DIR", "/recordings"))
 PCM_8K_BYTES_PER_MS = 16
+logger = logging.getLogger("voxagent.dograh")
 
 app = FastAPI(
     title="VoxAgent Dograh Bridge",
@@ -195,25 +205,27 @@ async def freeswitch_media(websocket: WebSocket) -> None:
             active_call_id = started.payload.get("call_id") or call_id
             pcm_buffer = bytearray()
             chunk_size = DOGRAH_MEDIA_CHUNK_MS * PCM_8K_BYTES_PER_MS
-            await upstream.send(
-                DograhSocketMessage(
-                    type="speak",
-                    payload={
-                        "call_id": active_call_id,
-                        "session_id": session_id,
-                        "language": language,
-                        "text": DOGRAH_GREETING_TEXT,
-                    },
-                ).model_dump_json()
-            )
-            greeting = DograhSocketMessage.model_validate_json(await upstream.recv())
-            if greeting.type == "audio_result":
-                if not await _send_freeswitch_audio(
-                    websocket,
-                    greeting.payload,
-                    call_id=active_call_id,
-                ):
-                    return
+            skipped_silence_chunks = 0
+            if DOGRAH_ENABLE_TTS:
+                await upstream.send(
+                    DograhSocketMessage(
+                        type="speak",
+                        payload={
+                            "call_id": active_call_id,
+                            "session_id": session_id,
+                            "language": language,
+                            "text": DOGRAH_GREETING_TEXT,
+                        },
+                    ).model_dump_json()
+                )
+                greeting = DograhSocketMessage.model_validate_json(await upstream.recv())
+                if greeting.type == "audio_result":
+                    if not await _send_freeswitch_audio(
+                        websocket,
+                        greeting.payload,
+                        call_id=active_call_id,
+                    ):
+                        return
 
             while True:
                 frame = await websocket.receive()
@@ -223,6 +235,28 @@ async def freeswitch_media(websocket: WebSocket) -> None:
                         continue
                     pcm_audio = bytes(pcm_buffer)
                     pcm_buffer.clear()
+                    rms = audioop.rms(pcm_audio, 2) if pcm_audio else 0
+                    peak = audioop.max(pcm_audio, 2) if pcm_audio else 0
+                    if rms < DOGRAH_MIN_AUDIO_RMS:
+                        skipped_silence_chunks += 1
+                        if skipped_silence_chunks == 1 or skipped_silence_chunks % 10 == 0:
+                            logger.info(
+                                "Skipping low-energy caller audio for call %s: rms=%s peak=%s bytes=%s skipped=%s",
+                                active_call_id,
+                                rms,
+                                peak,
+                                len(pcm_audio),
+                                skipped_silence_chunks,
+                            )
+                        continue
+                    skipped_silence_chunks = 0
+                    logger.info(
+                        "Forwarding caller audio to STT for call %s: rms=%s peak=%s bytes=%s",
+                        active_call_id,
+                        rms,
+                        peak,
+                        len(pcm_audio),
+                    )
                     wav_audio = _pcm16_wav(pcm_audio, sample_rate=8000)
                     await upstream.send(
                         DograhSocketMessage(

@@ -13,6 +13,8 @@ Core variables:
 - `DEFAULT_STT_PROVIDER`: configured STT provider key.
 - `DEFAULT_LLM_PROVIDER`: configured LLM provider key.
 - `DEFAULT_TTS_PROVIDER`: configured TTS provider key.
+- `ENABLE_TTS`: when false, the API skips TTS provider calls and returns text-only pipeline results.
+- `DOGRAH_ENABLE_TTS`: when false, Dograh skips greeting playback and does not play AI audio into FreeSWITCH.
 - `GROQ_API_KEY`: Groq API key for Whisper transcription and Groq LLM chat.
 - `GROQ_STT_MODEL`: Groq Whisper transcription model.
 - `GROQ_LLM_MODEL`: Groq chat model when `DEFAULT_LLM_PROVIDER=groq`.

@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     default_stt_provider: str = "groq"
     default_llm_provider: str = "claude"
     default_tts_provider: str = "cartesia"
+    enable_tts: bool = True
     stt_timeout_seconds: float = 30
     llm_timeout_seconds: float = 45
     tts_timeout_seconds: float = 30
